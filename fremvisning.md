@@ -1,45 +1,42 @@
-# Exercise 5 – Lab Approval Guide
+# Exercise 5
 
 ---
 
-## Step 1: Run all solutions and show correct output
+## Kjøre løsningene
 
 ```bash
-# Part 1 – Semaphores (D)
+# Del 1 – Semaphores (D)
 cd semaphore && rdmd semaphore.d
 
-# Part 2 – Condition Variables (D)
+# Del 2 – Condition Variables (D)
 cd conditionvariable && rdmd condvar.d
 
-# Part 3 – Protected Objects (Ada)
+# Del 3 – Protected Objects (Ada)
 cd protectedobject && gnatmake protectobj.adb && ./protectobj
 
-# Part 4 – Message Passing: Request (Go)
+# Del 4 – Message Passing: Request (Go)
 cd messagepassing && go run request.go
 
-# Part 4 – Message Passing: Priority Select (Go)
+# Del 4 – Message Passing: Priority Select (Go)
 cd messagepassing && go run priorityselect.go
 ```
 
-**What to point out in the output:**
-- Test 1: Users 0, 1, 2 run in that exact order (each alone, no contention)
-- Test 2: Even IDs (high priority) all execute before odd IDs (low priority)
-- Test 3: Users 6 and 7 (low priority) wait until users 1–5 (high priority) are all done
-- Parts 1 and 2 print `All tests pass`
+Output:
+- Test 1: brukerne 0, 1, 2 kjører én om gangen i rekkefølge
+- Test 2: alle partallsbrukere (høy prioritet) før oddetallsbrukere (lav)
+- Test 3: brukerne 6 og 7 venter til 1–5 er ferdig
+- Del 1 og 2 printer `All tests pass`
 
 ---
 
-## Step 2: Explain the bug in the original semaphore code
+## Bug i original semaphore-kode
 
-The TA will almost certainly ask about this.
-
-**The buggy pseudocode:**
 ```c
 void allocate(int priority){
     Wait(M);
     if(busy){
-        Signal(M);           // (A) releases the mutex
-        Wait(PS[priority]);  // (B) blocks on priority semaphore
+        Signal(M);           // (A) slipper mutex
+        Wait(PS[priority]);  // (B) blokkerer på semaphore
     }
     busy = true;
     Signal(M);
@@ -48,7 +45,7 @@ void allocate(int priority){
 void deallocate(){
     Wait(M);
     busy = false;
-    if(GetValue(PS[1]) < 0){   // checks if anyone is waiting
+    if(GetValue(PS[1]) < 0){
         Signal(PS[1]);
     } else if(GetValue(PS[0]) < 0){
         Signal(PS[0]);
@@ -58,17 +55,14 @@ void deallocate(){
 }
 ```
 
-**The bug:** Between (A) and (B), the mutex is released but the thread hasn't blocked yet.
-If `deallocate` runs in this window, `GetValue` returns 0 (the thread isn't in the semaphore queue yet),
-so it calls `Signal(M)` instead of `Signal(PS[priority])`.
-The thread then blocks at (B) — and nobody will ever signal it. **Deadlock.**
+Mellom (A) og (B) er mutex sluppet, men tråden har ikke blokkert ennå. Hvis `deallocate` kjører i dette vinduet ser den `GetValue == 0` og kaller `Signal(M)` i stedet for `Signal(PS[priority])`. Tråden blokkerer så på (B) og ingen signalerer den noen gang. Deadlock.
 
-**The fix (our solution):**
-Increment `numWaiting[priority]` *before* releasing M:
+**Fix:**
+Tell opp `numWaiting[priority]` mens vi fortsatt holder M:
 ```d
 mtx.wait();
 if(busy){
-    numWaiting[priority]++;   // counted while mutex is still held
+    numWaiting[priority]++;   // telt mens mutex holdes
     mtx.notify();
     sems[priority].wait();
     numWaiting[priority]--;
@@ -76,46 +70,43 @@ if(busy){
 busy = true;
 mtx.notify();
 ```
-Now `deallocate` checks `numWaiting` instead of `GetValue`, and `numWaiting` is always
-accurate because it is only modified while M is held.
+`deallocate` sjekker `numWaiting` i stedet for `GetValue`. `numWaiting` er alltid korrekt fordi det bare endres mens M holdes.
 
 ---
 
-## Step 3: Explain each solution and why it works
+## Løsningene
 
-### Part 1 – Semaphores
-- `mtx` acts as a mutex (initialized to 1)
-- `sems[0]` and `sems[1]` are the priority queues (initialized to 0)
-- `numWaiting[p]` counts how many threads are waiting at priority `p`
-- In `deallocate`, when handing off the resource we signal a priority semaphore but do **not** release M — the woken thread inherits M and releases it after setting `busy = true`
+### Del 1 – Semaphores
+- `mtx` er mutex (init 1), `sems[0/1]` er prioritetskøene (init 0)
+- `numWaiting[p]` teller ventende tråder på prioritet `p`
+- I `deallocate`: vi signalerer en prioritetssemaphore **uten** å slippe M – den vekte tråden arver M og slipper den etter å ha satt `busy = true`
 
-### Part 2 – Condition Variables
-- `allocate` inserts the caller's id into a priority queue, then loops: `while(queue.front != id) { cond.wait(); }`
-- `cond.wait()` atomically releases the mutex and sleeps — **this is what the semaphore solution has to simulate manually with `numWaiting`**
-- `deallocate` pops the front of the queue and calls `notifyAll()` — all waiters wake and re-check; only the new front proceeds
+### Del 2 – Condition Variables
+- `allocate` legger id inn i en prioritetskø, så looper: `while(queue.front != id) { cond.wait(); }`
+- `cond.wait()` slipper mutex og sover atomisk – dette er det semaphore-løsningen må simulere manuelt med `numWaiting`
+- `deallocate` popper fronten og kaller `notifyAll()` – alle vekkes og sjekker på nytt
 
-### Part 3 – Protected Objects (Ada)
+### Del 3 – Protected Objects (Ada)
 ```ada
 entry allocateHigh(val: out IntVec.Vector) when not busy is ...
 entry allocateLow(val: out IntVec.Vector)  when not busy and allocateHigh'Count = 0 is ...
 ```
-- `allocateHigh'Count` is the number of tasks queued at the `allocateHigh` entry
-- `allocateLow` is blocked as long as there are high-priority waiters — no low-priority task can sneak through
-- The runtime re-evaluates the guards atomically after every `deallocate` call
-- Ada's protected object is essentially a **monitor** — locking is enforced automatically, which removes the entire class of bugs from parts 1 & 2
+- `allocateHigh'Count` er antall tasks i køen på den entryen
+- `allocateLow` er blokkert så lenge det er noen som venter på `allocateHigh`
+- Ada re-evaluerer guards atomisk etter hver `deallocate`
+- En protected object er i bunn og grunn en **monitor** – låsing skjer automatisk, så hele klassen av bugs fra del 1 & 2 forsvinner
 
-### Part 4a – Message Passing: Request
-- The resource manager is a goroutine with a priority queue
-- A user sends a `ResourceRequest{id, priority, replyChan}` on `askFor`
-- If not busy: immediately sends resource to `replyChan`
-- If busy: inserts request into priority queue
-- On `giveBack`: dequeues highest-priority pending request and sends resource to it
+### Del 4a – Message Passing: Request
+- Resource manager er en goroutine med prioritetskø
+- Bruker sender `ResourceRequest{id, priority, replyChan}` på `askFor`
+- Hvis ikke opptatt: sender ressursen direkte til `replyChan`
+- Hvis opptatt: legger requesten i prioritetskøen
+- På `giveBack`: dequeur høyest prioritet og sender til den
 
-### Part 4b – Message Passing: Priority Select
-Go's `select` is random among ready cases, so we fake priority with `default`:
+### Del 4b – Message Passing: Priority Select
+Go's `select` er tilfeldig blant klare cases, så vi simulerer prioritet med `default`:
 ```go
 for {
-    // Non-blocking: give to high priority if anyone is waiting right now
     select {
     case takeHigh <- res:
         res = <-giveBack
@@ -123,7 +114,6 @@ for {
     default:
     }
 
-    // No high-priority waiter at this moment; wait for either
     select {
     case takeHigh <- res:
         res = <-giveBack
@@ -132,29 +122,24 @@ for {
     }
 }
 ```
-This is **best-effort**, not guaranteed. It works for the test cases because whenever
-the resource becomes free, a high-priority user is already waiting on `takeHigh`.
+Best-effort, ikke garantert. Fungerer for testene fordi det alltid er en høyprioritetsbruker klar når ressursen frigjøres.
 
 ---
 
-## Step 4: Answer follow-up questions
+## Diverse
 
-**Why is `getValue` on semaphores dubious?**
-> Its result is stale the moment you read it. By the time you act on it, another thread may have changed the count. It is inherently racy and is not even available on all platforms (Windows semaphores don't expose it).
+**`getValue` på semaphores** – verdien er utdatert i det du leser den, en annen tråd kan ha endret den. Iboende race condition, og finnes ikke engang på alle plattformer (Windows eksponerer det ikke).
 
-**How would you extend to N priorities?**
-| Mechanism | Extension |
+**N prioriteter:**
+| Mekanisme | Utvidelse |
 |---|---|
-| Semaphore | N semaphores + N `numWaiting` entries — scales but gets verbose |
-| Condition variable | Just change the comparator in the priority queue — scales cleanly |
-| Protected object | Needs N separate entries (`allocatePriority0`, `allocatePriority1`, ...) — not elegant |
-| Message passing (request) | Just change the priority queue comparator — scales cleanly |
-| Message passing (select) | Needs N channels + N nested `default` checks — gets unwieldy fast |
+| Semaphore | N semaphores + N `numWaiting` – skalerer men blir verbose |
+| Condition variable | Endre comparatoren i prioritetskøen – skalerer fint |
+| Protected object | Trenger N separate entries – ikke elegant |
+| Message passing (request) | Endre comparatoren – skalerer fint |
+| Message passing (select) | N kanaler + N nestede `default`-sjekker – rotete |
 
-**How do condition variables, monitors, and protected objects differ?**
-- A **condition variable** is a raw primitive: you must lock/unlock the mutex manually around every `wait`/`notifyAll`
-- A **monitor** (Java `synchronized`) enforces the mutex automatically when entering a method, but the condition is still user-defined
-- A **protected object** (Ada) goes further: it also enforces the *entry conditions* atomically via guards, so the runtime handles both locking and conditional access
-
-**Which solution do you prefer and why?**
-> Condition variables (or message passing with a request queue) generalize most cleanly to N priorities and keep the logic readable. Protected objects are the safest for simple cases because the runtime enforces correctness.
+**Condition variables vs monitors vs protected objects:**
+- **Condition variable**: rå primitiv, låser/låser opp mutex manuelt rundt `wait`/`notifyAll`
+- **Monitor** (Java `synchronized`): mutex håndheves automatisk ved inngang, betingelsen er fortsatt brukerdefinert
+- **Protected object** (Ada): håndhever også *entry-betingelsene* atomisk via guards, runtime tar seg av både låsing og betinget tilgang
